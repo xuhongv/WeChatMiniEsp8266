@@ -1,4 +1,3 @@
-<p align="center">
-  <img src="png/project.png"alt="Banner" />
-</p>
+
  
+ ![Alt text](png/project.png)
