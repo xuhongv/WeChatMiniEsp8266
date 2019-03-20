@@ -12,4 +12,4 @@
  
  ---------------------------
  
- ![Alt text](png/project.png)
+ ![Alt text](png/screen.png)
