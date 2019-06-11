@@ -1,0 +1,15 @@
+<view class="page">
+
+
+  <view class="page__bd page__bd_spacing">
+    <button class="weui-btn" type="primary" bindtap='onClick_connect'>连接服务器</button>
+    <button class="weui-btn" type="default" bindtap='onClick_SubOne'>订阅主题(单个)</button>
+    <button class="weui-btn" type="default" bindtap='onClick_SubMany'>订阅主题(多个)</button>
+    <button class="weui-btn" type="primary" plain="true" bindtap='onClick_PubMsg'>发布一则消息</button>
+    <button class="weui-btn" type="warn" bindtap='onClick_unSubOne'>取消订阅主题操作(单个)</button>
+     <button class="weui-btn" type="warn" bindtap='onClick_unSubMany'>取消订阅主题操作(多个)</button>
+  </view>
+  <view class="weui-footer weui-footer_fixed-bottom">
+    <view class="weui-footer__text">Copyright ©半颗心脏 https://github.com/xuhongv</view>
+  </view>
+</view>
