@@ -79,7 +79,7 @@ Page({
   onClick_SubOne: function() {
     if (this.data.client && this.data.client.connected) {
       //仅订阅单个主题
-      this.data.client.subscribe('Topic0', function(err, granted) {
+      this.data.client.subscribe('/sys/a1o3SXAACTs/rgb2812/thing/event/property/post', function(err, granted) {
         if (!err) {
           wx.showToast({
             title: '订阅主题成功'
