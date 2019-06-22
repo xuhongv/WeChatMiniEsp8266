@@ -92,8 +92,19 @@ function sendPacket (client, packet, cb) {
 function flush (queue) {
   if (queue) {
     Object.keys(queue).forEach(function (messageId) {
-      if (typeof queue[messageId] === 'function') {
-        queue[messageId](new Error('Connection closed'))
+      if (typeof queue[messageId].cb === 'function') {
+        queue[messageId].cb(new Error('Connection closed'))
+        delete queue[messageId]
+      }
+    })
+  }
+}
+
+function flushVolatile (queue) {
+  if (queue) {
+    Object.keys(queue).forEach(function (messageId) {
+      if (queue[messageId].volatile && typeof queue[messageId].cb === 'function') {
+        queue[messageId].cb(new Error('Connection closed'))
         delete queue[messageId]
       }
     })
@@ -258,18 +269,24 @@ MqttClient.prototype._setupStream = function () {
   })
 
   function nextTickWork () {
-    process.nextTick(work)
+    if (packets.length) {
+      process.nextTick(work)
+    } else {
+      var done = completeParse
+      completeParse = null
+      done()
+    }
   }
 
   function work () {
     var packet = packets.shift()
-    var done = completeParse
 
     if (packet) {
       that._handlePacket(packet, nextTickWork)
     } else {
+      var done = completeParse
       completeParse = null
-      done()
+      if (done) done()
     }
   }
 
@@ -286,6 +303,7 @@ MqttClient.prototype._setupStream = function () {
 
   // Echo stream close
   this.stream.on('close', function () {
+    flushVolatile(that.outgoing)
     that.emit('close')
   })
 
@@ -351,6 +369,10 @@ MqttClient.prototype._handlePacket = function (packet, done) {
       break
     case 'pingresp':
       this._handlePingresp(packet)
+      done()
+      break
+    case 'disconnect':
+      this._handleDisconnect(packet)
       done()
       break
     default:
@@ -439,7 +461,10 @@ MqttClient.prototype.publish = function (topic, message, opts, callback) {
     case 1:
     case 2:
       // Add to callbacks
-      this.outgoing[packet.messageId] = callback || nop
+      this.outgoing[packet.messageId] = {
+        volatile: false,
+        cb: callback || nop
+      }
       if (this._storeProcessing) {
         this._packetIdsDuringStoreProcessing[packet.messageId] = false
         this._storePacket(packet, undefined, opts.cbStorePut)
@@ -534,6 +559,7 @@ MqttClient.prototype.subscribe = function () {
           currentOpts.nl = opts.nl
           currentOpts.rap = opts.rap
           currentOpts.rh = opts.rh
+          currentOpts.properties = opts.properties
         }
         subs.push(currentOpts)
       }
@@ -553,6 +579,7 @@ MqttClient.prototype.subscribe = function () {
             currentOpts.nl = obj[k].nl
             currentOpts.rap = obj[k].rap
             currentOpts.rh = obj[k].rh
+            currentOpts.properties = opts.properties
           }
           subs.push(currentOpts)
         }
@@ -587,6 +614,7 @@ MqttClient.prototype.subscribe = function () {
           topic.nl = sub.nl || false
           topic.rap = sub.rap || false
           topic.rh = sub.rh || 0
+          topic.properties = sub.properties
         }
         that._resubscribeTopics[sub.topic] = topic
         topics.push(sub.topic)
@@ -595,15 +623,18 @@ MqttClient.prototype.subscribe = function () {
     that.messageIdToTopic[packet.messageId] = topics
   }
 
-  this.outgoing[packet.messageId] = function (err, packet) {
-    if (!err) {
-      var granted = packet.granted
-      for (var i = 0; i < granted.length; i += 1) {
-        subs[i].qos = granted[i]
+  this.outgoing[packet.messageId] = {
+    volatile: true,
+    cb: function (err, packet) {
+      if (!err) {
+        var granted = packet.granted
+        for (var i = 0; i < granted.length; i += 1) {
+          subs[i].qos = granted[i]
+        }
       }
-    }
 
-    callback(err, subs)
+      callback(err, subs)
+    }
   }
 
   this._sendPacket(packet)
@@ -667,7 +698,10 @@ MqttClient.prototype.unsubscribe = function () {
     packet.properties = opts.properties
   }
 
-  this.outgoing[packet.messageId] = callback
+  this.outgoing[packet.messageId] = {
+    volatile: true,
+    cb: callback
+  }
 
   this._sendPacket(packet)
 
@@ -761,7 +795,7 @@ MqttClient.prototype.end = function () {
  * @example client.removeOutgoingMessage(client.getLastMessageId());
  */
 MqttClient.prototype.removeOutgoingMessage = function (mid) {
-  var cb = this.outgoing[mid]
+  var cb = this.outgoing[mid] ? this.outgoing[mid].cb : null
   delete this.outgoing[mid]
   this.outgoingStore.del({messageId: mid}, function () {
     cb(new Error('Message removed'))
@@ -946,7 +980,7 @@ MqttClient.prototype._storePacket = function (packet, cb, cbStorePut) {
   if (((packet.qos || 0) === 0 && this.queueQoSZero) || packet.cmd !== 'publish') {
     this.queue.push({ packet: packet, cb: cb })
   } else if (packet.qos > 0) {
-    cb = this.outgoing[packet.messageId]
+    cb = this.outgoing[packet.messageId] ? this.outgoing[packet.messageId].cb : null
     this.outgoingStore.put(packet, function (err) {
       if (err) {
         return cb && cb(err)
@@ -1161,7 +1195,7 @@ MqttClient.prototype._handleAck = function (packet) {
   var mid = packet.messageId
   var type = packet.cmd
   var response = null
-  var cb = this.outgoing[mid]
+  var cb = this.outgoing[mid] ? this.outgoing[mid].cb : null
   var that = this
   var err
 
@@ -1260,6 +1294,16 @@ MqttClient.prototype._handlePubrel = function (packet, callback) {
 }
 
 /**
+ * _handleDisconnect
+ *
+ * @param {Object} packet
+ * @api private
+ */
+MqttClient.prototype._handleDisconnect = function (packet) {
+  this.emit('disconnect', packet)
+}
+
+/**
  * _nextId
  * @return unsigned int
  */
@@ -1286,12 +1330,22 @@ MqttClient.prototype.getLastMessageId = function () {
  * @api private
  */
 MqttClient.prototype._resubscribe = function (connack) {
+  var _resubscribeTopicsKeys = Object.keys(this._resubscribeTopics)
   if (!this._firstConnection &&
       (this.options.clean || (this.options.protocolVersion === 5 && !connack.sessionPresent)) &&
-      Object.keys(this._resubscribeTopics).length > 0) {
+      _resubscribeTopicsKeys.length > 0) {
     if (this.options.resubscribe) {
-      this._resubscribeTopics.resubscribe = true
-      this.subscribe(this._resubscribeTopics)
+      if (this.options.protocolVersion === 5) {
+        for (var topicI = 0; topicI < _resubscribeTopicsKeys.length; topicI++) {
+          var resubscribeTopic = {}
+          resubscribeTopic[_resubscribeTopicsKeys[topicI]] = this._resubscribeTopics[_resubscribeTopicsKeys[topicI]]
+          resubscribeTopic.resubscribe = true
+          this.subscribe(resubscribeTopic, {properties: resubscribeTopic[_resubscribeTopicsKeys[topicI]].properties})
+        }
+      } else {
+        this._resubscribeTopics.resubscribe = true
+        this.subscribe(this._resubscribeTopics)
+      }
     } else {
       this._resubscribeTopics = {}
     }
@@ -1364,14 +1418,17 @@ MqttClient.prototype._onConnect = function (packet) {
 
       // Avoid unnecessary stream read operations when disconnected
       if (!that.disconnecting && !that.reconnectTimer) {
-        cb = that.outgoing[packet.messageId]
-        that.outgoing[packet.messageId] = function (err, status) {
-          // Ensure that the original callback passed in to publish gets invoked
-          if (cb) {
-            cb(err, status)
-          }
+        cb = that.outgoing[packet.messageId] ? that.outgoing[packet.messageId].cb : null
+        that.outgoing[packet.messageId] = {
+          volatile: false,
+          cb: function (err, status) {
+            // Ensure that the original callback passed in to publish gets invoked
+            if (cb) {
+              cb(err, status)
+            }
 
-          storeDeliver()
+            storeDeliver()
+          }
         }
         that._packetIdsDuringStoreProcessing[packet.messageId] = true
         that._sendPacket(packet)
@@ -5270,7 +5327,7 @@ var iteratorSymbol = require("es6-symbol").iterator
   , desc           = { configurable: true, enumerable: true, writable: true, value: null }
   , defineProperty = Object.defineProperty;
 
-// eslint-disable-next-line complexity, max-lines-per-function
+// eslint-disable-next-line complexity
 module.exports = function (arrayLike /*, mapFn, thisArg*/) {
 	var mapFn = arguments[1]
 	  , thisArg = arguments[2]
